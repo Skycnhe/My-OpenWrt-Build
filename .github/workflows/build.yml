@@ -1,0 +1,168 @@
+name: Build OpenWrt 24.10 ARMv8 LXC (Fail-Safe)
+
+on:
+  workflow_dispatch:
+
+# --- 关键修改：自动申请写权限 ---
+permissions:
+  contents: write
+  actions: write
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-24.10
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Initialization Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y $(curl -fsSL is.gd/depends_ubuntu_2204)
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$USER /workdir
+
+    - name: Clone Source Code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load Custom Feeds & Plugins
+      run: |
+        cd openwrt
+        
+        # --- 1. 标准插件 (Feeds) ---
+        echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >> feeds.conf.default
+        echo 'src-git openclash https://github.com/vernesong/OpenClash' >> feeds.conf.default
+        
+        # --- 2. 强力植入插件 (Git Clone) ---
+        mkdir -p package/new_pkgs
+        
+        # Nikki (Mihomo)
+        git clone --depth 1 https://github.com/sbwml/openwrt_pkgs.git package/new_pkgs/sbwml || true
+        
+        # iStore
+        git clone --depth 1 https://github.com/linkease/istore.git package/new_pkgs/istore || true
+        git clone --depth 1 https://github.com/linkease/istore-ui.git package/new_pkgs/istore-ui || true
+        
+        # --- 3. 主题 (Git Clone) ---
+        # Argon
+        git clone --depth 1 https://github.com/jerrykuku/luci-theme-argon.git package/new_pkgs/luci-theme-argon || true
+        git clone --depth 1 https://github.com/jerrykuku/luci-app-argon-config.git package/new_pkgs/luci-app-argon-config || true
+        # Design (jsom8te)
+        git clone --depth 1 https://github.com/jsom8te/luci-theme-design.git package/new_pkgs/luci-theme-design || true
+        # Edge (kiddin9)
+        git clone --depth 1 https://github.com/kiddin9/luci-theme-edge.git package/new_pkgs/luci-theme-edge || true
+        # InfinityFreedom
+        git clone --depth 1 https://github.com/xiaoqingfengATGH/luci-theme-infinityfreedom.git package/new_pkgs/luci-theme-infinityfreedom || true
+
+    - name: Update & Install Feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Generate Configuration
+      run: |
+        cd openwrt
+        
+        # 目标：ARMv8 LXC
+        echo "CONFIG_TARGET_armvirt=y" >> .config
+        echo "CONFIG_TARGET_armvirt_64=y" >> .config
+        echo "CONFIG_TARGET_armvirt_64_Default=y" >> .config
+        echo "CONFIG_TARGET_ROOTFS_TARGZ=y" >> .config
+        
+        # 禁用不必要的格式
+        echo "# CONFIG_TARGET_ROOTFS_SQUASHFS is not set" >> .config
+        echo "# CONFIG_TARGET_ROOTFS_EXT4FS is not set" >> .config
+        
+        # 插件
+        echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-openclash-zh-cn=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-nikki=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-istore=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-istore-zh-cn=y" >> .config
+        echo "CONFIG_PACKAGE_luci-lib-taskd=y" >> .config
+        echo "CONFIG_PACKAGE_luci-lib-xterm=y" >> .config
+        
+        # 主题
+        echo "CONFIG_PACKAGE_luci-theme-argon=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-argon-config=y" >> .config
+        echo "CONFIG_PACKAGE_luci-theme-design=y" >> .config
+        echo "CONFIG_PACKAGE_luci-theme-edge=y" >> .config
+        echo "CONFIG_PACKAGE_luci-theme-infinityfreedom=y" >> .config
+        echo "CONFIG_PACKAGE_luci-theme-material=y" >> .config
+        
+        # 工具
+        echo "CONFIG_PACKAGE_curl=y" >> .config
+        echo "CONFIG_PACKAGE_htop=y" >> .config
+        echo "CONFIG_PACKAGE_bash=y" >> .config
+        echo "CONFIG_PACKAGE_tar=y" >> .config
+        echo "CONFIG_IPV6=y" >> .config
+        echo "CONFIG_PACKAGE_ip6tables=y" >> .config
+        
+        make defconfig
+
+    - name: Download Packages
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Organize Files
+      id: organize
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        
+        # 重命名
+        find . -name "*rootfs.tar.gz" -exec mv {} ImmortalWrt-24.10-ARMv8-LXC-Final.tar.gz \;
+        
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    # --- 关键新增 1：上传 Artifacts (双重保险) ---
+    # 即使 Release 失败，这个也能让你下载到固件
+    - name: Upload Firmware to Artifacts
+      uses: actions/upload-artifact@v4
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_Firmware
+        path: ${{ env.FIRMWARE }}/*
+
+    # --- 关键新增 2：上传 Release ---
+    - name: Upload Firmware to Release
+      uses: softprops/action-gh-release@v1
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        tag_name: OpenWrt_24.10_LXC_${{ github.run_number }}
+        files: ${{ env.FIRMWARE }}/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
