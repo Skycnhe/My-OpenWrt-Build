@@ -1,0 +1,187 @@
+name: Build OpenWrt 24.10 ARMv8 LXC (Final)
+
+on:
+  workflow_dispatch:
+
+env:
+  # 源码仓库：ImmortalWrt (天生集成更多优化)
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  # 分支：24.10 (最新版，内核 6.6)
+  REPO_BRANCH: openwrt-24.10
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Initialization Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        # 清理磁盘空间并安装编译依赖
+        # 注意：构建环境在美国，保持使用默认源以确保速度和稳定性
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y $(curl -fsSL is.gd/depends_ubuntu_2204)
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$USER /workdir
+
+    - name: Clone Source Code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load Custom Feeds & Themes
+      run: |
+        cd openwrt
+        
+        # --- 1. 核心插件源 (官方原版) ---
+        # Passwall
+        echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >> feeds.conf.default
+        # OpenClash
+        echo 'src-git openclash https://github.com/vernesong/OpenClash' >> feeds.conf.default
+        # Nikki (Mihomo) - 指定 24.10 分支以匹配核心
+        echo 'src-git sbwml https://github.com/sbwml/openwrt_pkgs.git;openwrt-24.10' >> feeds.conf.default
+        
+        # --- 2. 现代主题源 ---
+        # Argon (带自定义配置应用)
+        echo 'src-git argon https://github.com/jerrykuku/luci-theme-argon.git' >> feeds.conf.default
+        echo 'src-git argon_config https://github.com/jerrykuku/luci-app-argon-config.git' >> feeds.conf.default
+        # Design (极简风格)
+        echo 'src-git design https://github.com/0xACC0/luci-theme-design.git' >> feeds.conf.default
+
+        # --- 3. 魔改主题 (克隆到 package 目录) ---
+        # Edge (动态圆角)
+        git clone -b 18.06 https://github.com/garypang13/luci-theme-edge.git package/luci-theme-edge
+        # InfinityFreedom (磨砂透明)
+        git clone https://github.com/xiaoqingfengATGH/luci-theme-infinityfreedom.git package/luci-theme-infinityfreedom
+
+    - name: Update & Install Feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Generate Configuration
+      run: |
+        cd openwrt
+        
+        # ==========================================
+        # 核心配置生成区
+        # ==========================================
+        
+        # 1. 目标平台：ARMv8 (64-bit) for LXC/Docker
+        echo "CONFIG_TARGET_armvirt=y" >> .config
+        echo "CONFIG_TARGET_armvirt_64=y" >> .config
+        echo "CONFIG_TARGET_armvirt_64_Default=y" >> .config
+        
+        # 2. 输出格式：RootFS tar.gz (LXC 专用)
+        echo "CONFIG_TARGET_ROOTFS_TARGZ=y" >> .config
+        # 关闭不必要的镜像格式以加快编译
+        echo "# CONFIG_TARGET_ROOTFS_SQUASHFS is not set" >> .config
+        echo "# CONFIG_TARGET_ROOTFS_EXT4FS is not set" >> .config
+        echo "# CONFIG_ISO_IMAGES is not set" >> .config
+        
+        # 3. 插件配置
+        # Passwall
+        echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
+        # OpenClash
+        echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-openclash-zh-cn=y" >> .config
+        # Nikki (Mihomo)
+        echo "CONFIG_PACKAGE_luci-app-nikki=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y" >> .config
+        
+        # 4. 主题配置
+        # Argon (默认推荐)
+        echo "CONFIG_PACKAGE_luci-theme-argon=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-argon-config=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y" >> .config
+        # Design
+        echo "CONFIG_PACKAGE_luci-theme-design=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-design-config=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-design-config-zh-cn=y" >> .config
+        # Edge
+        echo "CONFIG_PACKAGE_luci-theme-edge=y" >> .config
+        # InfinityFreedom
+        echo "CONFIG_PACKAGE_luci-theme-infinityfreedom=y" >> .config
+        # Material
+        echo "CONFIG_PACKAGE_luci-theme-material=y" >> .config
+        
+        # 5. 常用工具与系统设置
+        echo "CONFIG_PACKAGE_curl=y" >> .config
+        echo "CONFIG_PACKAGE_htop=y" >> .config
+        echo "CONFIG_PACKAGE_nano=y" >> .config
+        echo "CONFIG_PACKAGE_bash=y" >> .config
+        echo "CONFIG_PACKAGE_tar=y" >> .config
+        # 开启 IPv6 支持
+        echo "CONFIG_IPV6=y" >> .config
+        echo "CONFIG_PACKAGE_ip6tables=y" >> .config
+        
+        # 生成完整配置
+        make defconfig
+
+    - name: Customize Firmware (CN Mirrors)
+      run: |
+        cd openwrt
+        
+        # --- 关键优化：固件内部源替换为阿里云 ---
+        # 1. 查找所有 distfeeds.conf 模板并替换域名
+        # ImmortalWrt 24.10 默认使用 downloads.immortalwrt.org
+        find package/base-files/files -name "distfeeds.conf" \
+          -exec sed -i 's/downloads.immortalwrt.org/mirrors.aliyun.com\/immortalwrt/g' {} +
+        
+        # 2. 也是为了保险，修改 config_generate 中的默认逻辑 (如果有)
+        sed -i 's/downloads.immortalwrt.org/mirrors.aliyun.com\/immortalwrt/g' package/base-files/files/bin/config_generate || true
+        
+        # 3. 调整连接数限制 (优化 P2P 和并发)
+        echo "net.netfilter.nf_conntrack_max=65535" >> package/base-files/files/etc/sysctl.conf
+
+    - name: Download Packages
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        # 24.10 比较稳定，直接多线程跑
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Organize Files
+      id: organize
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        
+        # 重命名文件，清晰标识
+        # 文件名示例: ImmortalWrt-24.10-ARMv8-LXC-Final.tar.gz
+        find . -name "*rootfs.tar.gz" -exec mv {} ImmortalWrt-24.10-ARMv8-LXC-Final.tar.gz \;
+        
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload Firmware to Release
+      uses: softprops/action-gh-release@v1
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        tag_name: OpenWrt_24.10_Final_${{ github.run_number }}
+        files: ${{ env.FIRMWARE }}/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
