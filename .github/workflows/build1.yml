@@ -1,0 +1,198 @@
+name: Build OpenWrt 24.10 ARMv8 LXC (iStore + Plugins)
+
+on:
+  workflow_dispatch:
+
+env:
+  # 源码：ImmortalWrt 24.10 (基于 OpenWrt 24.10，内核 6.6)
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-24.10
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Initialization Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        # 清理环境，最大化磁盘空间
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y $(curl -fsSL is.gd/depends_ubuntu_2204)
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$USER /workdir
+
+    - name: Clone Source Code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load Custom Feeds & Plugins
+      run: |
+        cd openwrt
+        
+        # --- 1. 使用 Feeds 引入标准插件 ---
+        # Passwall (小肉鸡)
+        echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >> feeds.conf.default
+        # OpenClash (Vernesong)
+        echo 'src-git openclash https://github.com/vernesong/OpenClash' >> feeds.conf.default
+        
+        # --- 2. 使用 Git Clone 引入特殊插件 (避免源错误) ---
+        # 这种方式比 feeds 更稳定，能解决 "update feeds error"
+        
+        # Nikki (Mihomo) - 放在 package/sbwml 目录下
+        mkdir -p package/new_pkgs
+        git clone --depth 1 https://github.com/sbwml/openwrt_pkgs.git package/new_pkgs/sbwml
+        
+        # iStore 商店 (核心 + UI)
+        git clone --depth 1 https://github.com/linkease/istore.git package/new_pkgs/istore
+        git clone --depth 1 https://github.com/linkease/istore-ui.git package/new_pkgs/istore-ui
+        
+        # --- 3. 主题大礼包 ---
+        # Argon (带配置)
+        git clone --depth 1 https://github.com/jerrykuku/luci-theme-argon.git package/new_pkgs/luci-theme-argon
+        git clone --depth 1 https://github.com/jerrykuku/luci-app-argon-config.git package/new_pkgs/luci-app-argon-config
+        # Design
+        git clone --depth 1 https://github.com/0xACC0/luci-theme-design.git package/new_pkgs/luci-theme-design
+        # Edge
+        git clone --depth 1 -b 18.06 https://github.com/garypang13/luci-theme-edge.git package/new_pkgs/luci-theme-edge
+        # InfinityFreedom
+        git clone --depth 1 https://github.com/xiaoqingfengATGH/luci-theme-infinityfreedom.git package/new_pkgs/luci-theme-infinityfreedom
+
+    - name: Update & Install Feeds
+      run: |
+        cd openwrt
+        # 更新标准 Feeds
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+        # 修正 iStore 可能缺失的依赖 (golang 等)
+        # ImmortalWrt 24.10 通常自带较新的 golang，这里做个保险
+        ./scripts/feeds install -a
+
+    - name: Generate Configuration
+      run: |
+        cd openwrt
+        
+        # ==========================================
+        # 核心配置
+        # ==========================================
+        
+        # 1. 目标平台：ARMv8 (64-bit) LXC 专用
+        echo "CONFIG_TARGET_armvirt=y" >> .config
+        echo "CONFIG_TARGET_armvirt_64=y" >> .config
+        echo "CONFIG_TARGET_armvirt_64_Default=y" >> .config
+        
+        # 2. 输出格式：RootFS.tar.gz
+        echo "CONFIG_TARGET_ROOTFS_TARGZ=y" >> .config
+        echo "# CONFIG_TARGET_ROOTFS_SQUASHFS is not set" >> .config
+        echo "# CONFIG_TARGET_ROOTFS_EXT4FS is not set" >> .config
+        
+        # ==========================================
+        # 插件选择
+        # ==========================================
+        
+        # Passwall
+        echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
+        
+        # OpenClash
+        echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-openclash-zh-cn=y" >> .config
+        
+        # Nikki (Mihomo)
+        echo "CONFIG_PACKAGE_luci-app-nikki=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y" >> .config
+        
+        # iStore 商店
+        echo "CONFIG_PACKAGE_luci-app-istore=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-istore-zh-cn=y" >> .config
+        # iStore 依赖的基础库 (防止编译失败)
+        echo "CONFIG_PACKAGE_luci-lib-taskd=y" >> .config
+        echo "CONFIG_PACKAGE_luci-lib-xterm=y" >> .config
+        
+        # ==========================================
+        # 主题选择
+        # ==========================================
+        
+        # Argon (默认推荐)
+        echo "CONFIG_PACKAGE_luci-theme-argon=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-argon-config=y" >> .config
+        
+        # Design
+        echo "CONFIG_PACKAGE_luci-theme-design=y" >> .config
+        
+        # Edge
+        echo "CONFIG_PACKAGE_luci-theme-edge=y" >> .config
+        
+        # InfinityFreedom
+        echo "CONFIG_PACKAGE_luci-theme-infinityfreedom=y" >> .config
+        
+        # Material
+        echo "CONFIG_PACKAGE_luci-theme-material=y" >> .config
+        
+        # ==========================================
+        # 工具与优化
+        # ==========================================
+        echo "CONFIG_PACKAGE_curl=y" >> .config
+        echo "CONFIG_PACKAGE_htop=y" >> .config
+        echo "CONFIG_PACKAGE_nano=y" >> .config
+        echo "CONFIG_PACKAGE_bash=y" >> .config
+        echo "CONFIG_PACKAGE_tar=y" >> .config
+        echo "CONFIG_PACKAGE_openssh-sftp-server=y" >> .config
+        
+        # 开启 IPv6
+        echo "CONFIG_IPV6=y" >> .config
+        echo "CONFIG_PACKAGE_ip6tables=y" >> .config
+        
+        make defconfig
+
+    - name: Download Packages
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        # 多线程编译
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Organize Files
+      id: organize
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        
+        # 清晰重命名
+        # 格式: ImmortalWrt-24.10-ARMv8-iStore.tar.gz
+        find . -name "*rootfs.tar.gz" -exec mv {} ImmortalWrt-24.10-ARMv8-iStore.tar.gz \;
+        
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload Firmware to Release
+      uses: softprops/action-gh-release@v1
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        tag_name: OpenWrt_24.10_iStore_${{ github.run_number }}
+        files: ${{ env.FIRMWARE }}/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
